@@ -1,0 +1,9 @@
+# 构建产物（Releases 分发，不入库）
+*.exe
+app.ico
+dist/
+
+# IDE / 系统
+.vs/
+*.user
+Thumbs.db
