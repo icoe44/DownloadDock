@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using Path = System.Windows.Shapes.Path;
@@ -25,6 +26,14 @@ namespace DownloadDock
         private const double DefaultMargin = 24;
         private const double DefaultTopOffset = 120;
 
+        // v1.2 行内缩略图 + 悬浮大图预览（尺寸均为 dip；缩略图高 ≤ 行内可用高度，行高不变）
+        private const double ThumbWidth = 36;
+        private const double ThumbHeight = 22;
+        private const double ThumbGap = 6;
+        private const int ThumbDecodeEdge = 120;   // 缩略图解码长边上限
+        private const int PreviewMaxEdge = 350;    // 悬浮预览最长边
+        private const int PreviewHoverDelayMs = 150;
+
         private static readonly SolidColorBrush NormalPillBrush =
             new SolidColorBrush(Color.FromArgb(0xE0, 0x1A, 0x1A, 0x1D));
         private static readonly SolidColorBrush HoverPillBrush =
@@ -36,6 +45,8 @@ namespace DownloadDock
         private Border _panel;
         private StackPanel _rowsHost;
         private TextBlock _countText;
+        private Popup _previewPopup;
+        private Image _previewImage;
         private readonly DispatcherTimer _collapseTimer;
         private readonly DispatcherTimer _saveTimer;
         private readonly DownloadWatcher _watcher;
@@ -82,6 +93,8 @@ namespace DownloadDock
             _panel = BuildPanel();
             Grid.SetRow(_panel, 1);
             root.Children.Add(_panel);
+
+            BuildPreview();
 
             _collapseTimer = new DispatcherTimer();
             _collapseTimer.Interval = TimeSpan.FromMilliseconds(220);
@@ -277,6 +290,7 @@ namespace DownloadDock
 
         public void RefreshList()
         {
+            ClosePreview(); // 行即将重建，正在显示的预览一并收起
             _rowsHost.Children.Clear();
             List<DownloadItem> items;
             try
@@ -329,19 +343,27 @@ namespace DownloadDock
             row.Tag = item;
 
             Grid g = new Grid();
-            ColumnDefinition c0 = new ColumnDefinition();
-            c0.Width = new GridLength(1, GridUnitType.Star);
-            ColumnDefinition c1 = new ColumnDefinition();
-            c1.Width = new GridLength(86);
-            g.ColumnDefinitions.Add(c0);
-            g.ColumnDefinitions.Add(c1);
+            ColumnDefinition cThumb = new ColumnDefinition();
+            cThumb.Width = new GridLength(ThumbWidth);
+            ColumnDefinition cName = new ColumnDefinition();
+            cName.Width = new GridLength(1, GridUnitType.Star);
+            ColumnDefinition cDate = new ColumnDefinition();
+            cDate.Width = new GridLength(86);
+            g.ColumnDefinitions.Add(cThumb);
+            g.ColumnDefinitions.Add(cName);
+            g.ColumnDefinitions.Add(cDate);
+
+            FrameworkElement thumb = MakeThumb(item);
+            Grid.SetColumn(thumb, 0);
+            g.Children.Add(thumb);
 
             TextBlock name = new TextBlock();
             name.Text = item.Name;
+            name.Margin = new Thickness(ThumbGap, 0, 0, 0);
             name.VerticalAlignment = VerticalAlignment.Center;
             name.TextTrimming = TextTrimming.CharacterEllipsis;
             name.Foreground = new SolidColorBrush(Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF));
-            Grid.SetColumn(name, 0);
+            Grid.SetColumn(name, 1);
 
             TextBlock date = new TextBlock();
             date.Text = item.ModifiedText;
@@ -349,7 +371,7 @@ namespace DownloadDock
             date.HorizontalAlignment = HorizontalAlignment.Right;
             date.FontSize = 11;
             date.Foreground = new SolidColorBrush(Color.FromArgb(0x9E, 0xFF, 0xFF, 0xFF));
-            Grid.SetColumn(date, 1);
+            Grid.SetColumn(date, 2);
 
             g.Children.Add(name);
             g.Children.Add(date);
@@ -368,6 +390,139 @@ namespace DownloadDock
             row.MouseMove += RowMouseMove;
             row.MouseLeftButtonUp += RowMouseUp;
             return row;
+        }
+
+        // ---------- v1.2 缩略图 + 悬浮大图预览 ----------
+
+        private FrameworkElement MakeThumb(DownloadItem item)
+        {
+            Border box = new Border();
+            box.Width = ThumbWidth;
+            box.Height = ThumbHeight;
+            box.CornerRadius = new CornerRadius(4);
+            box.Background = new SolidColorBrush(Color.FromArgb(0x1E, 0xFF, 0xFF, 0xFF));
+            box.VerticalAlignment = VerticalAlignment.Center;
+
+            BitmapSource src = ThumbCache.Get(item.FullPath, item.Modified, ThumbDecodeEdge);
+            if (src == null) return box; // 非图片 / 解码失败：暗色圆角占位块
+
+            Image img = new Image();
+            img.Source = src;
+            img.Width = ThumbWidth;
+            img.Height = ThumbHeight;
+            img.Stretch = Stretch.UniformToFill;
+            img.HorizontalAlignment = HorizontalAlignment.Center;
+            img.VerticalAlignment = VerticalAlignment.Center;
+            // UniformToFill 会溢出显示区：用与圆角一致的矩形裁掉，得到圆角缩略图
+            img.Clip = new RectangleGeometry(new Rect(0, 0, ThumbWidth, ThumbHeight), 4, 4);
+            box.Child = img;
+            box.Cursor = Cursors.Hand;
+            AttachPreview(img, item);
+            return box;
+        }
+
+        private void AttachPreview(FrameworkElement target, DownloadItem item)
+        {
+            DispatcherTimer timer = new DispatcherTimer();
+            timer.Interval = TimeSpan.FromMilliseconds(PreviewHoverDelayMs);
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                ShowPreview(target, item);
+            };
+            target.MouseEnter += delegate
+            {
+                timer.Stop();
+                timer.Start();
+            };
+            target.MouseLeave += delegate
+            {
+                timer.Stop();
+                ClosePreview();
+            };
+            target.MouseLeftButtonDown += delegate
+            {
+                timer.Stop();
+                ClosePreview();
+            };
+        }
+
+        private void BuildPreview()
+        {
+            _previewImage = new Image();
+            _previewImage.MaxWidth = PreviewMaxEdge;
+            _previewImage.MaxHeight = PreviewMaxEdge;
+            _previewImage.Stretch = Stretch.Uniform;
+            _previewImage.HorizontalAlignment = HorizontalAlignment.Center;
+            _previewImage.VerticalAlignment = VerticalAlignment.Center;
+            RenderOptions.SetBitmapScalingMode(_previewImage, BitmapScalingMode.Fant); // 大比例缩小更干净
+
+            Border card = new Border();
+            card.CornerRadius = new CornerRadius(8);
+            card.Background = new SolidColorBrush(Color.FromArgb(0xF0, 0x1C, 0x1C, 0x1E));
+            card.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
+            card.BorderThickness = new Thickness(1);
+            card.Padding = new Thickness(6);
+            card.Child = _previewImage;
+
+            _previewPopup = new Popup();
+            _previewPopup.AllowsTransparency = true;
+            _previewPopup.PopupAnimation = PopupAnimation.Fade;
+            _previewPopup.StaysOpen = true;
+            _previewPopup.IsHitTestVisible = false; // 纯展示，不截鼠标
+            _previewPopup.Child = card;
+        }
+
+        private void ShowPreview(FrameworkElement target, DownloadItem item)
+        {
+            if (_panel.Visibility != Visibility.Visible) return;
+            if (_previewPopup == null) return;
+            BitmapSource src = ThumbCache.Get(item.FullPath, item.Modified, PreviewMaxEdge);
+            if (src == null) return;
+
+            _previewImage.Source = src;
+            // 解码已按长边 350 封顶且归一化 96dpi → 弹窗内容尺寸可直接推知（含 6+6 padding、1+1 边框）
+            double popupW = Math.Min(src.PixelWidth, PreviewMaxEdge) + 14;
+            double popupH = Math.Min(src.PixelHeight, PreviewMaxEdge) + 14;
+
+            // 钳制在缩略图所在屏幕的工作区内（物理像素 → dip）
+            double scale = 1.0;
+            PresentationSource ps = PresentationSource.FromVisual(this);
+            if (ps != null && ps.CompositionTarget != null)
+            {
+                double m = ps.CompositionTarget.TransformToDevice.M11;
+                if (m > 0) scale = m;
+            }
+            Point phys = target.PointToScreen(new Point(0, 0));
+            double targetTopDips = phys.Y / scale;
+            double waTop = 0;
+            double waBottom = SystemParameters.PrimaryScreenHeight;
+            try
+            {
+                System.Drawing.Rectangle area = System.Windows.Forms.Screen.FromPoint(
+                    new System.Drawing.Point((int)phys.X, (int)phys.Y)).WorkingArea;
+                waTop = area.Top / scale;
+                waBottom = area.Bottom / scale;
+            }
+            catch { }
+
+            double offsetY = (target.ActualHeight - popupH) / 2;      // 垂直中心对齐缩略图
+            double minTop = waTop + 8 - targetTopDips;                // 弹窗顶不低于工作区顶 +8
+            double maxTop = waBottom - 8 - popupH - targetTopDips;    // 弹窗底不超工作区底 -8
+            if (offsetY < minTop) offsetY = minTop;
+            if (offsetY > maxTop) offsetY = maxTop;
+
+            _previewPopup.PlacementTarget = target;
+            _previewPopup.Placement = PlacementMode.RelativePoint;
+            _previewPopup.HorizontalOffset = -popupW - 8; // 弹窗右缘贴缩略图左缘 -8px 间距
+            _previewPopup.VerticalOffset = Math.Round(offsetY);
+            _previewPopup.IsOpen = true;
+        }
+
+        private void ClosePreview()
+        {
+            if (_previewPopup != null && _previewPopup.IsOpen) _previewPopup.IsOpen = false;
+            if (_previewImage != null) _previewImage.Source = null;
         }
 
         // ---------- 拖拽（OLE 文件拖放到 PS/AI） ----------
@@ -451,6 +606,7 @@ namespace DownloadDock
 
         private void Collapse()
         {
+            ClosePreview();
             _panel.Visibility = Visibility.Collapsed;
             Height = PillHeight;
             UpdateLayout();
