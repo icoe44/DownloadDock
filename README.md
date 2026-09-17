@@ -85,7 +85,7 @@ src/
 └── TrayHost.cs         托盘图标
 ```
 
-技术要点：WPF `AllowsTransparency` 异形置顶窗口 · `DragDrop.DoDragDrop` 原生 OLE 拖放 · `SHGetKnownFolderPath` 识别重定位的下载文件夹 · `FileSystemWatcher` 防抖刷新 · WIC 解码 + `DecodePixelWidth` 按长边封顶（downscale-only，OnLoad 不锁文件）+ Popup 悬浮预览 · 旧版 csc 可编译（源码保持 C# 5 语法）。
+技术要点：WPF `AllowsTransparency` 异形置顶窗口 · `DragDrop.DoDragDrop` 原生 OLE 拖放 · `SHGetKnownFolderPath` 识别重定位的下载文件夹 · `FileSystemWatcher` 防抖刷新 · WIC 解码 + `DecodePixelWidth` 按长边封顶（downscale-only，OnLoad 不锁文件）· 悬浮预览用独立置顶穿透窗口（`WS_EX_TRANSPARENT`；WPF Popup 的自动搬移会漂位，弃用）· 旧版 csc 可编译（源码保持 C# 5 语法）。
 
 ## 🤝 贡献
 

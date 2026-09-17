@@ -74,6 +74,7 @@ namespace DownloadDock
                 try
                 {
                     Log("SELFTEST OK: " + _window.TestProbe());
+                    Log("PREVIEW SELFTEST: " + _window.PreviewSelftest());
                 }
                 catch (Exception ex)
                 {

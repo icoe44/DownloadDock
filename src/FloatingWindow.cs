@@ -45,7 +45,7 @@ namespace DownloadDock
         private Border _panel;
         private StackPanel _rowsHost;
         private TextBlock _countText;
-        private Popup _previewPopup;
+        private Window _previewWindow;
         private Image _previewImage;
         private readonly DispatcherTimer _collapseTimer;
         private readonly DispatcherTimer _saveTimer;
@@ -465,27 +465,52 @@ namespace DownloadDock
             card.Padding = new Thickness(6);
             card.Child = _previewImage;
 
-            _previewPopup = new Popup();
-            _previewPopup.AllowsTransparency = true;
-            _previewPopup.PopupAnimation = PopupAnimation.Fade;
-            _previewPopup.StaysOpen = true;
-            _previewPopup.IsHitTestVisible = false; // 纯展示，不截鼠标
-            _previewPopup.Child = card;
+            // v1.2.1 弃用 Popup：RelativePoint 在越界/翻转场景下落点会被 WPF 自动搬移
+            // （实测横向漂移近 400px）。改用独立无边框置顶窗口——Window.Left/Top 没有任何
+            // 自动搬移逻辑，位置完全自控；WS_EX_TRANSPARENT 让鼠标事件完全穿透，
+            // 不干扰列表的 hover / 拖拽。
+            _previewWindow = new Window();
+            _previewWindow.WindowStyle = WindowStyle.None;
+            _previewWindow.AllowsTransparency = true;
+            _previewWindow.Background = Brushes.Transparent;
+            _previewWindow.Topmost = true;
+            _previewWindow.ShowInTaskbar = false;
+            _previewWindow.ShowActivated = false;
+            _previewWindow.Focusable = false;
+            _previewWindow.ResizeMode = ResizeMode.NoResize;
+            _previewWindow.IsHitTestVisible = false;
+            // Owner 不能在这里设：WPF 要求 Owner 宿主窗口已显示。改在 ShowPreview 首显时挂。
+            _previewWindow.Content = card;
+            _previewWindow.SourceInitialized += delegate { MakePreviewClickThrough(); };
+        }
+
+        private void MakePreviewClickThrough()
+        {
+            try
+            {
+                IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(_previewWindow).Handle;
+                int style = GetWindowLong(hwnd, GWL_EXSTYLE);
+                SetWindowLong(hwnd, GWL_EXSTYLE,
+                    style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+            }
+            catch (Exception ex)
+            {
+                App.Log("preview click-through failed: " + ex.Message);
+            }
         }
 
         private void ShowPreview(FrameworkElement target, DownloadItem item)
         {
             if (_panel.Visibility != Visibility.Visible) return;
-            if (_previewPopup == null) return;
+            if (_previewWindow == null) return;
             BitmapSource src = ThumbCache.Get(item.FullPath, item.Modified, PreviewMaxEdge);
             if (src == null) return;
 
             _previewImage.Source = src;
-            // 解码已按长边 350 封顶且归一化 96dpi → 弹窗内容尺寸可直接推知（含 6+6 padding、1+1 边框）
+            // 解码已按长边 350 封顶且归一化 96dpi → 弹窗尺寸可直接推知（含 6+6 padding、1+1 边框）
             double popupW = Math.Min(src.PixelWidth, PreviewMaxEdge) + 14;
             double popupH = Math.Min(src.PixelHeight, PreviewMaxEdge) + 14;
 
-            // 钳制在缩略图所在屏幕的工作区内（物理像素 → dip）
             double scale = 1.0;
             PresentationSource ps = PresentationSource.FromVisual(this);
             if (ps != null && ps.CompositionTarget != null)
@@ -494,34 +519,43 @@ namespace DownloadDock
                 if (m > 0) scale = m;
             }
             Point phys = target.PointToScreen(new Point(0, 0));
-            double targetTopDips = phys.Y / scale;
-            double waTop = 0;
-            double waBottom = SystemParameters.PrimaryScreenHeight;
+            double thumbLeftDips = phys.X / scale;
+            double thumbTopDips = phys.Y / scale;
+            double waLeft = 0, waTop = 0, waBottom = SystemParameters.PrimaryScreenHeight;
             try
             {
                 System.Drawing.Rectangle area = System.Windows.Forms.Screen.FromPoint(
                     new System.Drawing.Point((int)phys.X, (int)phys.Y)).WorkingArea;
+                waLeft = area.Left / scale;
                 waTop = area.Top / scale;
                 waBottom = area.Bottom / scale;
             }
             catch { }
 
-            double offsetY = (target.ActualHeight - popupH) / 2;      // 垂直中心对齐缩略图
-            double minTop = waTop + 8 - targetTopDips;                // 弹窗顶不低于工作区顶 +8
-            double maxTop = waBottom - 8 - popupH - targetTopDips;    // 弹窗底不超工作区底 -8
-            if (offsetY < minTop) offsetY = minTop;
-            if (offsetY > maxTop) offsetY = maxTop;
+            // 水平：弹窗右缘贴缩略图左缘 -10（与列表面板内缘平齐）
+            double left = thumbLeftDips - popupW - 10;
+            // 垂直：弹窗顶与所在行顶平齐（缩略图顶 -6）向下展开；底部放不下 →
+            // 底对齐行底 +6 向上展开；仍越界则整体钳进工作区。
+            double top = thumbTopDips - 6;
+            if (top + popupH > waBottom - 8) top = thumbTopDips + ThumbHeight + 6 - popupH;
+            if (top < waTop + 8) top = waTop + 8;
+            if (top + popupH > waBottom - 8) top = waBottom - 8 - popupH;
+            if (left < waLeft + 8) left = waLeft + 8;
 
-            _previewPopup.PlacementTarget = target;
-            _previewPopup.Placement = PlacementMode.RelativePoint;
-            _previewPopup.HorizontalOffset = -popupW - 8; // 弹窗右缘贴缩略图左缘 -8px 间距
-            _previewPopup.VerticalOffset = Math.Round(offsetY);
-            _previewPopup.IsOpen = true;
+            _previewWindow.Left = Math.Round(left);
+            _previewWindow.Top = Math.Round(top);
+            _previewWindow.Width = Math.Round(popupW);
+            _previewWindow.Height = Math.Round(popupH);
+            if (!_previewWindow.IsVisible)
+            {
+                if (_previewWindow.Owner == null && IsVisible) _previewWindow.Owner = this; // Owner 要求宿主已显示
+                _previewWindow.Show();
+            }
         }
 
         private void ClosePreview()
         {
-            if (_previewPopup != null && _previewPopup.IsOpen) _previewPopup.IsOpen = false;
+            if (_previewWindow != null && _previewWindow.IsVisible) _previewWindow.Hide();
             if (_previewImage != null) _previewImage.Source = null;
         }
 
@@ -650,6 +684,18 @@ namespace DownloadDock
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out NativePoint p);
 
+        // 预览窗口穿透样式（v1.2.1）：鼠标事件全穿透 + 永不激活 + 不进 Alt-Tab
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
         // ---------- 位置记忆 ----------
 
         private void LoadSettingsEarly()
@@ -732,6 +778,46 @@ namespace DownloadDock
         }
 
         // ---------- 自检 ----------
+
+        // 程序内验证预览落点：展开列表 → 走真实 ShowPreview 路径 → 量
+        // gap = 缩略图左缘 - 预览窗右缘（期望 ≈10）与 topDelta = 预览顶 - 行顶（期望 ≈0）。
+        // 不需要真实鼠标，也 user 无感（selftest 进程自启自退）。
+        public string PreviewSelftest()
+        {
+            Expand();
+            Border row = null;
+            foreach (object c in _rowsHost.Children)
+            {
+                Border b = c as Border;
+                if (b != null && b.Tag is DownloadItem) { row = b; break; }
+            }
+            if (row == null) return "selftest: no file rows";
+            Grid g = row.Child as Grid;
+            if (g == null || g.Children.Count == 0) return "selftest: no grid";
+            Border thumbBox = g.Children[0] as Border;
+            Image img = thumbBox != null ? thumbBox.Child as Image : null;
+            if (img == null) return "selftest: first row is not an image";
+            ShowPreview(img, (DownloadItem)row.Tag);
+            UpdateLayout();
+
+            double scale = 1.0;
+            PresentationSource ps = PresentationSource.FromVisual(this);
+            if (ps != null && ps.CompositionTarget != null)
+            {
+                double m = ps.CompositionTarget.TransformToDevice.M11;
+                if (m > 0) scale = m;
+            }
+            Point tp = img.PointToScreen(new Point(0, 0));
+            double thumbLeft = tp.X / scale, thumbTop = tp.Y / scale;
+            double gap = thumbLeft - (_previewWindow.Left + _previewWindow.Width);
+            double topDelta = _previewWindow.Top - (thumbTop - 6); // 行顶 = 缩略图顶 -6
+            return string.Format(CultureInfo.InvariantCulture,
+                "thumb=({0},{1}) preview=(L={2},T={3},W={4},H={5}) gap={6} topDelta={7}",
+                Math.Round(thumbLeft), Math.Round(thumbTop),
+                Math.Round(_previewWindow.Left), Math.Round(_previewWindow.Top),
+                Math.Round(_previewWindow.Width), Math.Round(_previewWindow.Height),
+                Math.Round(gap), Math.Round(topDelta));
+        }
 
         public string TestProbe()
         {
